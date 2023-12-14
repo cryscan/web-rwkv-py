@@ -1213,8 +1213,18 @@ dependencies = [
  "serde",
  "serde_json",
  "uid",
- "web-rwkv-derive",
+ "web-rwkv-derive 0.2.0 (git+https://github.com/cryscan/web-rwkv?tag=v0.4.6)",
  "wgpu",
+]
+
+[[package]]
+name = "web-rwkv-derive"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7853e68f05577afc0c66b73191fb2f11c5177d273e0017270ffb3df1f135325f"
+dependencies = [
+ "quote",
+ "syn 2.0.41",
 ]
 
 [[package]]
@@ -1236,6 +1246,7 @@ dependencies = [
  "pollster",
  "pyo3",
  "web-rwkv",
+ "web-rwkv-derive 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
