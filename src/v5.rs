@@ -7,8 +7,8 @@ use pyo3::{exceptions::PyValueError, prelude::*};
 use web_rwkv::{
     context::Context,
     model::{
-        loader::Loader, run::ModelRun as _, v5, Lora, ModelBase as _, ModelBuilder,
-        ModelState as _, ModelVersion, Quant, StateBuilder,
+        loader::Loader, run::ModelRun as _, v5, BackedState as _, Lora, ModelBase as _,
+        ModelBuilder, ModelState as _, ModelVersion, Quant, StateBuilder,
     },
 };
 use web_rwkv_derive::Deref;
@@ -136,7 +136,7 @@ impl ModelState {
 #[pymethods]
 impl BackedState {
     #[new]
-    fn new(model: &Model, batch: usize, data: Vec<f32>) -> PyResult<Self> {
+    pub fn new(model: &Model, batch: usize, data: Vec<Vec<f32>>) -> PyResult<Self> {
         let backed = || {
             let context = model.context();
             let info = model.info();
@@ -144,17 +144,33 @@ impl BackedState {
             let mut backed = StateBuilder::new(context, info)
                 .with_max_batch(batch)
                 .build_backed::<v5::BackedState>();
-            let shape = backed.data[0].0;
 
-            if data.len() != shape.len() {
-                bail!("incorrect state size: {} vs. {}", data.len(), shape.len());
+            if data.len() != backed.data.len() {
+                bail!(
+                    "incorrect state chunks: {} vs {}",
+                    data.len(),
+                    backed.data.len()
+                );
             }
 
-            backed.data = Arc::new(vec![(shape, data)]);
+            let mut shape_data = vec![];
+            for (backed, data) in backed.data.iter().zip(data.into_iter()) {
+                let shape = backed.0;
+                if data.len() != shape.len() {
+                    bail!("incorrect state size: {} vs. {}", data.len(), shape.len());
+                }
+                shape_data.push((shape, data))
+            }
+
+            backed.data = Arc::new(shape_data);
             Ok(backed)
         };
         let backed = backed().map_err(|err| PyValueError::new_err(err.to_string()))?;
         Ok(Self(backed))
+    }
+
+    pub fn max_batch(&self) -> usize {
+        self.0.max_batch()
     }
 }
 
