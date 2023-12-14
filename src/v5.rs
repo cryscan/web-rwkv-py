@@ -176,8 +176,13 @@ fn run_one_internal(model: Model, state: ModelState, tokens: Vec<u16>) -> Result
 }
 
 #[pyfunction]
-pub fn run_one(model: &Model, tokens: Vec<u16>, state: Option<&ModelState>) -> PyResult<Vec<f32>> {
-    let state = state.cloned().unwrap_or_else(|| ModelState::new(model, 1));
-    run_one_internal(model.clone(), state, tokens)
-        .map_err(|err| PyValueError::new_err(err.to_string()))
+pub fn run_one(
+    model: &Model,
+    tokens: Vec<u16>,
+    state: Option<ModelState>,
+) -> PyResult<(Vec<f32>, ModelState)> {
+    let state = state.unwrap_or_else(|| ModelState::new(model, 1));
+    let logits = run_one_internal(model.clone(), state.clone(), tokens)
+        .map_err(|err| PyValueError::new_err(err.to_string()))?;
+    Ok((logits, state))
 }
