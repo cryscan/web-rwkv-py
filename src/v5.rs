@@ -21,7 +21,7 @@ pub struct Model(Arc<v5::Model<'static>>);
 
 #[pyclass]
 #[derive(Debug, Deref, Clone)]
-pub struct ModelState(Arc<v5::ModelState>);
+pub struct ModelState(v5::ModelState);
 
 #[pyclass]
 #[derive(Debug, Deref, Clone)]
@@ -103,8 +103,7 @@ impl ModelState {
         Self(
             StateBuilder::new(context, info)
                 .with_max_batch(batch)
-                .build::<v5::ModelState>()
-                .into(),
+                .build::<v5::ModelState>(),
         )
     }
 
@@ -134,6 +133,31 @@ impl ModelState {
     }
 }
 
+#[pymethods]
+impl BackedState {
+    #[new]
+    fn new(model: &Model, batch: usize, data: Vec<f32>) -> PyResult<Self> {
+        let backed = || {
+            let context = model.context();
+            let info = model.info();
+
+            let mut backed = StateBuilder::new(context, info)
+                .with_max_batch(batch)
+                .build_backed::<v5::BackedState>();
+            let shape = backed.data[0].0;
+
+            if data.len() != shape.len() {
+                bail!("incorrect state size: {} vs. {}", data.len(), shape.len());
+            }
+
+            backed.data = Arc::new(vec![(shape, data)]);
+            Ok(backed)
+        };
+        let backed = backed().map_err(|err| PyValueError::new_err(err.to_string()))?;
+        Ok(Self(backed))
+    }
+}
+
 fn run_one_internal(model: Model, state: ModelState, tokens: Vec<u16>) -> Result<Vec<f32>> {
     if state.max_batch() != 1 {
         bail!("state batch size must be 1")
@@ -152,6 +176,8 @@ fn run_one_internal(model: Model, state: ModelState, tokens: Vec<u16>) -> Result
 }
 
 #[pyfunction]
-pub fn run_one(model: Model, state: ModelState, tokens: Vec<u16>) -> PyResult<Vec<f32>> {
-    run_one_internal(model, state, tokens).map_err(|err| PyValueError::new_err(err.to_string()))
+pub fn run_one(model: &Model, tokens: Vec<u16>, state: Option<&ModelState>) -> PyResult<Vec<f32>> {
+    let state = state.cloned().unwrap_or_else(|| ModelState::new(model, 1));
+    run_one_internal(model.clone(), state, tokens)
+        .map_err(|err| PyValueError::new_err(err.to_string()))
 }
