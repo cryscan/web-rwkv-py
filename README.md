@@ -28,3 +28,19 @@ Python binding for [`web-rwkv`](https://github.com/cryscan/web-rwkv).
    logits, state = wrp.v5.run_one(model, [114, 514], state=None)
    ```
    
+# Advanced Usage
+1. Move state to memory:
+   
+   ```python
+   logits, state = wrp.v5.run_one(model, [114, 514], state=None) # returned state is on vram
+   memory_state = state.back()
+   ```
+   
+2. Load state from memory:
+   
+   ```python
+   vram_state = wrp.v5.ModelState(model, 1)
+   vram_state.load(memory_state)
+   logits, state = wrp.v5.run_one(model, [114, 514], state=vram_state)
+   ```
+   
