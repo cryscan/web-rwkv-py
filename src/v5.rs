@@ -71,11 +71,11 @@ impl Model {
         quant_nf4: Option<usize>,
     ) -> PyResult<Self> {
         let model = || {
-            let context = pollster::block_on(create_context())?;
             let file = File::open(file)?;
             let map = unsafe { Mmap::map(&file)? };
 
             let info = Loader::info(&map)?;
+            let context = pollster::block_on(create_context(info.max_buffer_size() as u32))?;
             println!("{:#?}", info);
             match info.version {
                 ModelVersion::V5 => {

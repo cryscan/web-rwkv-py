@@ -2,22 +2,29 @@ use std::{fs::File, path::PathBuf};
 
 use anyhow::Result;
 use memmap2::Mmap;
+use half::f16;
 use pyo3::{exceptions::PyValueError, prelude::*};
 use web_rwkv::{
     context::{Context, ContextBuilder, Instance},
     model::loader::Loader,
     wgpu,
 };
+use web_rwkv::num::Scalar;
 
 mod v5;
 
-async fn create_context() -> Result<Context> {
+async fn create_context(max_buffer_size: u32) -> Result<Context> {
     let instance = Instance::new();
     let adapter = instance
         .adapter(wgpu::PowerPreference::HighPerformance)
         .await?;
+    let limits = wgpu::Limits {
+        max_storage_buffer_binding_size: max_buffer_size,
+        ..Default::default()
+    };
     let context = ContextBuilder::new(adapter)
         .with_default_pipelines()
+        .with_limits(limits)
         .build()
         .await?;
     println!("{:#?}", context.adapter.get_info());
@@ -93,6 +100,11 @@ impl ModelInfo {
     #[pyo3(name = "__str__")]
     pub fn str(&self) -> String {
         format!("{:#?}", self)
+    }
+
+    /// Computes the required storage buffer size.
+    pub fn max_buffer_size(&self) -> usize {
+        (self.num_emb * self.num_hidden * f16::size()).max(128 << 20)
     }
 }
 
