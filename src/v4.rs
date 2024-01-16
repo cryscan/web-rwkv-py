@@ -7,7 +7,7 @@ use pyo3::{exceptions::PyValueError, prelude::*};
 use web_rwkv::{
     context::Context,
     model::{
-        loader::Loader, run::ModelRun as _, v5, BackedState as _, Lora, ModelBase as _,
+        loader::Loader, run::ModelRun as _, v4, BackedState as _, Lora, ModelBase as _,
         ModelBuilder, ModelState as _, ModelVersion, Quant, StateBuilder,
     },
 };
@@ -17,15 +17,15 @@ use crate::create_context;
 
 #[pyclass]
 #[derive(Debug, Deref, Clone)]
-pub struct Model(Arc<v5::Model<'static>>);
+pub struct Model(Arc<v4::Model<'static>>);
 
 #[pyclass]
 #[derive(Debug, Deref, Clone)]
-pub struct ModelState(v5::ModelState);
+pub struct ModelState(v4::ModelState);
 
 #[pyclass]
 #[derive(Debug, Deref, Clone)]
-pub struct BackedState(v5::BackedState);
+pub struct BackedState(v4::BackedState);
 
 fn load_model(
     context: &Context,
@@ -34,7 +34,7 @@ fn load_model(
     quant: Option<usize>,
     quant_nf4: Option<usize>,
     turbo: bool,
-) -> Result<v5::Model<'static>> {
+) -> Result<v4::Model<'static>> {
     let quant = quant
         .map(|layer| (0..layer).map(|layer| (layer, Quant::Int8)).collect_vec())
         .unwrap_or_default();
@@ -62,7 +62,7 @@ fn load_model(
 
 #[pymethods]
 impl Model {
-    pub const VERSION: ModelVersion = ModelVersion::V5;
+    pub const VERSION: ModelVersion = ModelVersion::V4;
 
     #[new]
     pub fn new(
@@ -105,7 +105,7 @@ impl ModelState {
         Self(
             StateBuilder::new(context, info)
                 .with_max_batch(batch)
-                .build::<v5::ModelState>(),
+                .build::<v4::ModelState>(),
         )
     }
 
@@ -138,14 +138,14 @@ impl ModelState {
 #[pymethods]
 impl BackedState {
     #[new]
-    pub fn new(model: &Model, batch: usize, data: Vec<Vec<f32>>) -> PyResult<Self> {
+    pub fn new(model: &Model, batch: usize, data: Vec<f32>) -> PyResult<Self> {
         let backed = || {
             let context = model.context();
             let info = model.info();
 
             let mut backed = StateBuilder::new(context, info)
                 .with_max_batch(batch)
-                .build_backed::<v5::BackedState>();
+                .build_backed::<v4::BackedState>();
 
             if data.len() != backed.data.len() {
                 bail!(
@@ -155,16 +155,7 @@ impl BackedState {
                 );
             }
 
-            let mut shape_data = vec![];
-            for (backed, data) in backed.data.iter().zip(data.into_iter()) {
-                let shape = backed.0;
-                if data.len() != shape.len() {
-                    bail!("incorrect state size: {} vs. {}", data.len(), shape.len());
-                }
-                shape_data.push((shape, data))
-            }
-
-            backed.data = Arc::new(shape_data);
+            backed.data = data.into();
             Ok(backed)
         };
         let backed = backed().map_err(|err| PyValueError::new_err(err.to_string()))?;

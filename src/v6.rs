@@ -7,7 +7,7 @@ use pyo3::{exceptions::PyValueError, prelude::*};
 use web_rwkv::{
     context::Context,
     model::{
-        loader::Loader, run::ModelRun as _, v5, BackedState as _, Lora, ModelBase as _,
+        loader::Loader, run::ModelRun as _, v6, BackedState as _, Lora, ModelBase as _,
         ModelBuilder, ModelState as _, ModelVersion, Quant, StateBuilder,
     },
 };
@@ -17,15 +17,15 @@ use crate::create_context;
 
 #[pyclass]
 #[derive(Debug, Deref, Clone)]
-pub struct Model(Arc<v5::Model<'static>>);
+pub struct Model(Arc<v6::Model<'static>>);
 
 #[pyclass]
 #[derive(Debug, Deref, Clone)]
-pub struct ModelState(v5::ModelState);
+pub struct ModelState(v6::ModelState);
 
 #[pyclass]
 #[derive(Debug, Deref, Clone)]
-pub struct BackedState(v5::BackedState);
+pub struct BackedState(v6::BackedState);
 
 fn load_model(
     context: &Context,
@@ -34,7 +34,7 @@ fn load_model(
     quant: Option<usize>,
     quant_nf4: Option<usize>,
     turbo: bool,
-) -> Result<v5::Model<'static>> {
+) -> Result<v6::Model<'static>> {
     let quant = quant
         .map(|layer| (0..layer).map(|layer| (layer, Quant::Int8)).collect_vec())
         .unwrap_or_default();
@@ -62,7 +62,7 @@ fn load_model(
 
 #[pymethods]
 impl Model {
-    pub const VERSION: ModelVersion = ModelVersion::V5;
+    pub const VERSION: ModelVersion = ModelVersion::V6;
 
     #[new]
     pub fn new(
@@ -105,7 +105,7 @@ impl ModelState {
         Self(
             StateBuilder::new(context, info)
                 .with_max_batch(batch)
-                .build::<v5::ModelState>(),
+                .build::<v6::ModelState>(),
         )
     }
 
@@ -145,7 +145,7 @@ impl BackedState {
 
             let mut backed = StateBuilder::new(context, info)
                 .with_max_batch(batch)
-                .build_backed::<v5::BackedState>();
+                .build_backed::<v6::BackedState>();
 
             if data.len() != backed.data.len() {
                 bail!(

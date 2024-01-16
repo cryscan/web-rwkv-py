@@ -9,15 +9,17 @@ use web_rwkv::{
     wgpu,
 };
 
+mod v4;
 mod v5;
+mod v6;
 
-async fn create_context() -> Result<Context> {
+async fn create_context(info: &web_rwkv::model::ModelInfo) -> Result<Context> {
     let instance = Instance::new();
     let adapter = instance
         .adapter(wgpu::PowerPreference::HighPerformance)
         .await?;
     let context = ContextBuilder::new(adapter)
-        .with_default_pipelines()
+        .with_auto_limits(info)
         .build()
         .await?;
     println!("{:#?}", context.adapter.get_info());
@@ -112,12 +114,20 @@ fn web_rwkv_py(py: Python, module: &PyModule) -> PyResult<()> {
     module.add_class::<ModelInfo>()?;
     module.add_function(wrap_pyfunction!(peek_info, module)?)?;
 
-    let module_v5 = PyModule::new(py, "v5")?;
-    module_v5.add_class::<v5::Model>()?;
-    module_v5.add_class::<v5::ModelState>()?;
-    module_v5.add_class::<v5::BackedState>()?;
-    module_v5.add_function(wrap_pyfunction!(v5::run_one, module_v5)?)?;
-    module.add_submodule(module_v5)?;
+    macro_rules! add_module {
+        ($ver:ident) => {
+            let submodule = PyModule::new(py, stringify!($ver))?;
+            submodule.add_class::<$ver::Model>()?;
+            submodule.add_class::<$ver::ModelState>()?;
+            submodule.add_class::<$ver::BackedState>()?;
+            submodule.add_function(wrap_pyfunction!($ver::run_one, submodule)?)?;
+            module.add_submodule(submodule)?;
+        };
+    }
+
+    add_module!(v4);
+    add_module!(v5);
+    add_module!(v6);
 
     Ok(())
 }
