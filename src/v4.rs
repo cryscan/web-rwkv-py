@@ -149,7 +149,7 @@ impl BackedState {
 
             if data.len() != backed.data.len() {
                 bail!(
-                    bail!("incorrect state size: {} vs. {}", data.len(), shape.len());
+                    "incorrect state size: {} vs. {}",
                     data.len(),
                     backed.data.len()
                 );
