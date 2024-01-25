@@ -3,7 +3,7 @@ Python binding for [`web-rwkv`](https://github.com/cryscan/web-rwkv).
 
 # Todos
 - [x] Basic V5 inference support
-- [ ] Support V4, V5 and V6
+- [x] Support V4, V5 and V6
 - [ ] Batched inference
 
 # Usage
