@@ -26,9 +26,10 @@ Python binding for [`web-rwkv`](https://github.com/cryscan/web-rwkv).
 
    model = wrp.v5.Model(
       "/path/to/model.st", # model path
-      turbo=True,          # faster when reading long prompts
       quant=0,             # int8 quantization layers
-      quant_nf4=0          # nf4 quantization layers
+      quant_nf4=0,         # nf4 quantization layers
+      turbo=True,          # faster when reading long prompts
+      token_chunk_size=256 # maximum tokens in an inference chunk (can be 32, 64, 256, 1024, etc.)
    )
    logits, state = wrp.v5.run_one(model, [114, 514], state=None)
    ```

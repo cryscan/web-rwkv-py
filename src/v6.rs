@@ -32,20 +32,20 @@ fn load_model(
     context: &Context,
     data: &[u8],
     lora: Option<PathBuf>,
-    quant: Option<usize>,
-    quant_nf4: Option<usize>,
+    quant: usize,
+    quant_nf4: usize,
     turbo: bool,
+    token_chunk_size: usize,
 ) -> Result<v6::Model<'static>> {
-    let quant = quant
-        .map(|layer| (0..layer).map(|layer| (layer, Quant::Int8)).collect_vec())
-        .unwrap_or_default();
-    let quant_nf4 = quant_nf4
-        .map(|layer| (0..layer).map(|layer| (layer, Quant::NF4)).collect_vec())
-        .unwrap_or_default();
+    let quant = (0..quant).map(|layer| (layer, Quant::Int8)).collect_vec();
+    let quant_nf4 = (0..quant_nf4)
+        .map(|layer| (layer, Quant::NF4))
+        .collect_vec();
     let quant = quant.into_iter().chain(quant_nf4).collect();
     let model = ModelBuilder::new(context, data)
         .with_quant(quant)
-        .with_turbo(turbo);
+        .with_turbo(turbo)
+        .with_token_chunk_size(token_chunk_size);
     match lora {
         Some(lora) => {
             let file = File::open(lora)?;
@@ -66,13 +66,14 @@ impl Model {
     pub const VERSION: ModelVersion = ModelVersion::V6;
 
     #[new]
-    #[pyo3(signature = (file, turbo=true, lora=None, quant=None, quant_nf4=None))]
+    #[pyo3(signature = (file, lora=None, quant=0, quant_nf4=0, turbo=true, token_chunk_size=32))]
     pub fn new(
         file: PathBuf,
-        turbo: bool,
         lora: Option<PathBuf>,
-        quant: Option<usize>,
-        quant_nf4: Option<usize>,
+        quant: usize,
+        quant_nf4: usize,
+        turbo: bool,
+        token_chunk_size: usize,
     ) -> PyResult<Self> {
         let model = || {
             let file = File::open(file)?;
@@ -82,9 +83,15 @@ impl Model {
             let context = pollster::block_on(create_context(&info))?;
             println!("{:#?}", info);
             match info.version {
-                Self::VERSION => {
-                    anyhow::Ok(load_model(&context, &map, lora, quant, quant_nf4, turbo)?)
-                }
+                Self::VERSION => anyhow::Ok(load_model(
+                    &context,
+                    &map,
+                    lora,
+                    quant,
+                    quant_nf4,
+                    turbo,
+                    token_chunk_size,
+                )?),
                 version => bail!(
                     "model version {:?} is incorrect, should be {:?}",
                     version,
