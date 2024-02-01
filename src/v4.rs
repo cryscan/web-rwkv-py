@@ -8,7 +8,8 @@ use web_rwkv::{
     context::Context,
     model::{
         loader::Loader, run::ModelRun as _, v4, BackedState as _, Lora, ModelBase as _,
-        ModelBuilder, ModelState as _, ModelVersion, Quant, StateBuilder,
+        ModelBuilder, ModelInput, ModelOutput, ModelState as _, ModelVersion, OutputType, Quant,
+        StateBuilder,
     },
 };
 use web_rwkv_derive::Deref;
@@ -65,6 +66,7 @@ impl Model {
     pub const VERSION: ModelVersion = ModelVersion::V4;
 
     #[new]
+    #[pyo3(signature = (file, turbo=true, lora=None, quant=None, quant_nf4=None))]
     pub fn new(
         file: PathBuf,
         turbo: bool,
@@ -167,21 +169,24 @@ impl BackedState {
     }
 }
 
-fn run_one_internal(model: Model, state: ModelState, tokens: Vec<u16>) -> Result<Vec<f32>> {
+fn run_one_internal(model: &Model, state: &ModelState, input: ModelInput) -> Result<ModelOutput> {
     if state.max_batch() != 1 {
         bail!("state batch size must be 1")
     }
-    if tokens.is_empty() {
+    if input.tokens.is_empty() {
         bail!("prompt cannot be empty")
     }
 
-    let mut tokens = vec![tokens];
-    let mut logits = vec![None];
+    let mut inputs = vec![input];
+    let mut outputs = vec![ModelOutput::None];
 
-    while logits[0].is_none() {
-        logits = pollster::block_on(model.run(&mut tokens, &state.0))?;
+    while matches!(outputs[0], ModelOutput::None) {
+        outputs = pollster::block_on(model.run(&mut inputs, &state.0))?;
     }
-    Ok(logits[0].clone().unwrap())
+
+    let mut output = ModelOutput::None;
+    std::mem::swap(&mut output, &mut outputs[0]);
+    Ok(output)
 }
 
 #[pyfunction]
@@ -191,7 +196,36 @@ pub fn run_one(
     state: Option<ModelState>,
 ) -> PyResult<(Vec<f32>, ModelState)> {
     let state = state.unwrap_or_else(|| ModelState::new(model, 1));
-    let logits = run_one_internal(model.clone(), state.clone(), tokens)
+    let input = ModelInput {
+        tokens,
+        ty: OutputType::Last,
+    };
+    let output = run_one_internal(model, &state, input)
         .map_err(|err| PyValueError::new_err(err.to_string()))?;
-    Ok((logits, state))
+    let output = match output {
+        ModelOutput::Last(data) => data,
+        _ => unreachable!(),
+    };
+    Ok((output, state))
+}
+
+#[pyfunction]
+pub fn run_one_full(
+    model: &Model,
+    tokens: Vec<u16>,
+    state: Option<ModelState>,
+) -> PyResult<(Vec<Vec<f32>>, ModelState)> {
+    let state = state.unwrap_or_else(|| ModelState::new(model, 1));
+    let input = ModelInput {
+        tokens,
+        ty: OutputType::Full,
+    };
+    let output = run_one_internal(model, &state, input)
+        .map_err(|err| PyValueError::new_err(err.to_string()))?;
+    let output = match output {
+        ModelOutput::Last(data) => vec![data],
+        ModelOutput::Full(data) => data,
+        _ => unreachable!(),
+    };
+    Ok((output, state))
 }

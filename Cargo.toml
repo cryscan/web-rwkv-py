@@ -1,6 +1,6 @@
 [package]
 name = "web-rwkv-py"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -9,14 +9,10 @@ name = "web_rwkv_py"
 crate-type = ["cdylib"]
 
 [dependencies]
-web-rwkv = "0.5.1"
+web-rwkv = "0.6.0"
 web-rwkv-derive = "0.2.0"
 anyhow = "1"
 pyo3 = "0.20.0"
 pollster = "0.3.0"
 memmap2 = "0.9"
-itertools = "0.11"
-
-# [dependencies.web-rwkv]
-# git = "https://github.com/cryscan/web-rwkv"
-# tag = "v0.4.6"
+itertools = "0.12"

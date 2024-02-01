@@ -24,23 +24,34 @@ Python binding for [`web-rwkv`](https://github.com/cryscan/web-rwkv).
    ```python
    import web_rwkv_py as wrp
 
-   model = wrp.v5.Model("/path/to/model.st", turbo=False)
+   model = wrp.v5.Model(
+      "/path/to/model.st", # model path
+      turbo=True,          # faster when reading long prompts
+      quant=0,             # int8 quantization layers
+      quant_nf4=0          # nf4 quantization layers
+   )
    logits, state = wrp.v5.run_one(model, [114, 514], state=None)
    ```
    
 # Advanced Usage
-1. Move state to memory:
+1. Move state to host memory:
    
    ```python
    logits, state = wrp.v5.run_one(model, [114, 514], state=None) # returned state is on vram
-   memory_state = state.back()
+   state_cpu = state.back()
    ```
    
-2. Load state from memory:
+2. Load state from host memory:
    
    ```python
-   vram_state = wrp.v5.ModelState(model, 1)
-   vram_state.load(memory_state)
-   logits, state = wrp.v5.run_one(model, [114, 514], state=vram_state)
+   state = wrp.v5.ModelState(model, 1)
+   state.load(state_cpu)
+   logits, state = wrp.v5.run_one(model, [114, 514], state=state_cpu)
    ```
    
+3. Return predictions of all tokens (not only the last's):
+
+   ```python
+   logits, state = wrp.v5.run_one_full(model, [114, 514], state=None)
+   len(logits) # 2
+   ```

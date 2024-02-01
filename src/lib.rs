@@ -121,6 +121,7 @@ fn web_rwkv_py(py: Python, module: &PyModule) -> PyResult<()> {
             submodule.add_class::<$ver::ModelState>()?;
             submodule.add_class::<$ver::BackedState>()?;
             submodule.add_function(wrap_pyfunction!($ver::run_one, submodule)?)?;
+            submodule.add_function(wrap_pyfunction!($ver::run_one_full, submodule)?)?;
             module.add_submodule(submodule)?;
         };
     }
