@@ -192,15 +192,12 @@ fn run_one_internal(model: &Model, state: &ModelState, input: ModelInput) -> Res
         out.into_iter()
             .zip(outputs.iter_mut())
             .for_each(|(out, current)| {
-                let mut last = ModelOutput::None;
-                std::mem::swap(current, &mut last);
+                let last = std::mem::take(current);
                 *current = last.concat(out);
             });
     }
 
-    let mut output = ModelOutput::None;
-    std::mem::swap(&mut output, &mut outputs[0]);
-    Ok(output)
+    Ok(std::mem::take(&mut outputs[0]))
 }
 
 #[pyfunction]
