@@ -196,8 +196,15 @@ fn run_one_internal(model: &Model, state: &ModelState, input: ModelInput) -> Res
     let mut inputs = vec![input];
     let mut outputs = vec![ModelOutput::None];
 
-    while matches!(outputs[0], ModelOutput::None) {
-        outputs = pollster::block_on(model.run(&mut inputs, &state.0))?;
+    while inputs.iter().any(|input| !input.tokens.is_empty()) {
+        let out = pollster::block_on(model.run(&mut inputs, &state.0))?;
+        out.into_iter()
+            .zip(outputs.iter_mut())
+            .for_each(|(out, current)| {
+                let mut last = ModelOutput::None;
+                std::mem::swap(current, &mut last);
+                *current = last.concat(out);
+            });
     }
 
     let mut output = ModelOutput::None;

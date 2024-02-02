@@ -9,7 +9,7 @@ name = "web_rwkv_py"
 crate-type = ["cdylib"]
 
 [dependencies]
-web-rwkv = "0.6.0"
+web-rwkv = "0.6.1"
 web-rwkv-derive = "0.2.0"
 anyhow = "1"
 pyo3 = "0.20.0"
