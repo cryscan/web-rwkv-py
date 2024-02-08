@@ -26,10 +26,6 @@ jobs:
         target: [x86_64, x86, aarch64, armv7, s390x, ppc64le]
     steps:
       - uses: actions/checkout@v3
-      - name: Update Packages
-        run: sudo apt-get update -yq --allow-releaseinfo-change
-      - name: Install dependencies
-        run: sudo apt-get install -yq --no-install-recommends libudev-dev libasound2-dev libxcb-composite0-dev
       - uses: actions-rs/toolchain@v1
         with:
           profile: minimal
@@ -60,10 +56,6 @@ jobs:
         target: [x64, x86]
     steps:
       - uses: actions/checkout@v3
-      - name: Update Packages
-        run: sudo apt-get update -yq --allow-releaseinfo-change
-      - name: Install dependencies
-        run: sudo apt-get install -yq --no-install-recommends libudev-dev libasound2-dev libxcb-composite0-dev
       - uses: actions-rs/toolchain@v1
         with:
           profile: minimal
@@ -94,10 +86,6 @@ jobs:
         target: [x86_64, aarch64]
     steps:
       - uses: actions/checkout@v3
-      - name: Update Packages
-        run: sudo apt-get update -yq --allow-releaseinfo-change
-      - name: Install dependencies
-        run: sudo apt-get install -yq --no-install-recommends libudev-dev libasound2-dev libxcb-composite0-dev
       - uses: actions-rs/toolchain@v1
         with:
           profile: minimal
@@ -124,10 +112,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - name: Update Packages
-        run: sudo apt-get update -yq --allow-releaseinfo-change
-      - name: Install dependencies
-        run: sudo apt-get install -yq --no-install-recommends libudev-dev libasound2-dev libxcb-composite0-dev
       - uses: actions-rs/toolchain@v1
         with:
           profile: minimal
