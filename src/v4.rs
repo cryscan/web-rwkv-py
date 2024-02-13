@@ -3,7 +3,7 @@ use std::{fs::File, path::PathBuf, sync::Arc};
 use anyhow::{bail, Result};
 use itertools::Itertools;
 use memmap2::Mmap;
-use pyo3::{exceptions::PyValueError, prelude::*};
+use pyo3::prelude::*;
 use web_rwkv::{
     context::Context,
     model::{
@@ -14,7 +14,7 @@ use web_rwkv::{
 };
 use web_rwkv_derive::Deref;
 
-use crate::create_context;
+use crate::{create_context, err};
 
 #[pyclass]
 #[derive(Debug, Deref, Clone)]
@@ -52,7 +52,7 @@ fn load_model(
             let map = unsafe { Mmap::map(&file)? };
             model
                 .add_lora(Lora {
-                    data: map.to_vec(),
+                    data: &map,
                     blend: Default::default(),
                 })
                 .build()
@@ -99,9 +99,7 @@ impl Model {
                 ),
             }
         };
-        model()
-            .map(|model| Self(model.into()))
-            .map_err(|err| PyValueError::new_err(err.to_string()))
+        model().map(|model| Self(model.into())).map_err(err)
     }
 }
 
@@ -113,22 +111,18 @@ impl ModelState {
         let info = model.info();
         Self(
             StateBuilder::new(context, info)
-                .with_max_batch(batch)
+                .with_num_batch(batch)
                 .build::<v4::ModelState>(),
         )
     }
 
     pub fn load(&self, backed: &BackedState) -> PyResult<()> {
-        self.0
-            .load(backed)
-            .map_err(|err| PyValueError::new_err(err.to_string()))?;
+        self.0.load(backed).map_err(err)?;
         Ok(())
     }
 
     pub fn load_batch(&self, backed: &BackedState, batch: usize) -> PyResult<()> {
-        self.0
-            .load_batch(backed, batch)
-            .map_err(|err| PyValueError::new_err(err.to_string()))?;
+        self.0.load_batch(backed, batch).map_err(err)?;
         Ok(())
     }
 
@@ -138,8 +132,7 @@ impl ModelState {
     }
 
     pub fn back_batch(&self, batch: usize) -> PyResult<BackedState> {
-        let back = pollster::block_on(self.0.back_batch(batch))
-            .map_err(|err| PyValueError::new_err(err.to_string()))?;
+        let back = pollster::block_on(self.0.back_batch(batch)).map_err(err)?;
         Ok(BackedState(back))
     }
 }
@@ -153,7 +146,7 @@ impl BackedState {
             let info = model.info();
 
             let mut backed = StateBuilder::new(context, info)
-                .with_max_batch(batch)
+                .with_num_batch(batch)
                 .build_backed::<v4::BackedState>();
 
             if data.len() != backed.data.len() {
@@ -164,20 +157,20 @@ impl BackedState {
                 );
             }
 
-            backed.data = data.into();
+            backed.data = data;
             Ok(backed)
         };
-        let backed = backed().map_err(|err| PyValueError::new_err(err.to_string()))?;
+        let backed = backed().map_err(err)?;
         Ok(Self(backed))
     }
 
     pub fn max_batch(&self) -> usize {
-        self.0.max_batch()
+        self.0.num_batch()
     }
 }
 
 fn run_one_internal(model: &Model, state: &ModelState, input: ModelInput) -> Result<ModelOutput> {
-    if state.max_batch() != 1 {
+    if state.num_batch() != 1 {
         bail!("state batch size must be 1")
     }
     if input.tokens.is_empty() {
@@ -211,8 +204,7 @@ pub fn run_one(
         tokens,
         ty: OutputType::Last,
     };
-    let output = run_one_internal(model, &state, input)
-        .map_err(|err| PyValueError::new_err(err.to_string()))?;
+    let output = run_one_internal(model, &state, input).map_err(err)?;
     let output = match output {
         ModelOutput::Last(data) => data,
         _ => unreachable!(),
@@ -231,8 +223,7 @@ pub fn run_one_full(
         tokens,
         ty: OutputType::Full,
     };
-    let output = run_one_internal(model, &state, input)
-        .map_err(|err| PyValueError::new_err(err.to_string()))?;
+    let output = run_one_internal(model, &state, input).map_err(err)?;
     let output = match output {
         ModelOutput::Last(data) => vec![data],
         ModelOutput::Full(data) => data,

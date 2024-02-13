@@ -26,6 +26,10 @@ async fn create_context(info: &web_rwkv::model::ModelInfo) -> Result<Context> {
     Ok(context)
 }
 
+fn err(err: impl ToString) -> PyErr {
+    PyValueError::new_err(err.to_string())
+}
+
 #[pyclass]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ModelVersion {
@@ -105,7 +109,7 @@ fn peek_info(file: PathBuf) -> PyResult<ModelInfo> {
         let map = unsafe { Mmap::map(&file)? };
         Ok(Loader::info(&map)?.into())
     };
-    info().map_err(|err| PyValueError::new_err(err.to_string()))
+    info().map_err(err)
 }
 
 #[pymodule]
