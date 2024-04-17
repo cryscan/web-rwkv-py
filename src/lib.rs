@@ -1,19 +1,51 @@
-use std::{fs::File, path::PathBuf};
+use std::{
+    collections::HashMap,
+    fs::File,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::Result;
+use derivative::Derivative;
+use half::f16;
+use itertools::Itertools;
 use memmap2::Mmap;
+use pollster::FutureExt;
 use pyo3::{exceptions::PyValueError, prelude::*};
+use safetensors::SafeTensors;
 use web_rwkv::{
     context::{Context, ContextBuilder, Instance},
-    model::loader::Loader,
+    runtime::{
+        infer::{InferInput, InferOutput},
+        loader::Loader,
+        model::{
+            Build, ContextAutoLimits, ModelBuilder, ModelInfo, ModelRuntime, ModelVersion, Quant,
+            State as ModelState,
+        },
+        v4, v5, v6, JobRuntime,
+    },
+    tensor::TensorCpu,
     wgpu,
 };
 
-mod v4;
-mod v5;
-mod v6;
+fn err(err: impl ToString) -> PyErr {
+    PyValueError::new_err(err.to_string())
+}
 
-async fn create_context(info: &web_rwkv::model::ModelInfo) -> Result<Context> {
+/// A model with runtime.
+#[pyclass]
+#[derive(Clone, Derivative)]
+#[derivative(Debug)]
+pub struct Model {
+    tokio: Arc<tokio::runtime::Runtime>,
+    runtime: JobRuntime<InferInput, InferOutput<f16>>,
+
+    #[derivative(Debug = "ignore")]
+    state: Arc<dyn ModelState + Send + Sync>,
+    id: Arc<Mutex<uid::Id<StateId>>>,
+}
+
+async fn create_context(info: &ModelInfo) -> Result<Context> {
     let instance = Instance::new();
     let adapter = instance
         .adapter(wgpu::PowerPreference::HighPerformance)
@@ -22,117 +54,99 @@ async fn create_context(info: &web_rwkv::model::ModelInfo) -> Result<Context> {
         .with_auto_limits(info)
         .build()
         .await?;
-    println!("{:#?}", context.adapter.get_info());
     Ok(context)
 }
 
-fn err(err: impl ToString) -> PyErr {
-    PyValueError::new_err(err.to_string())
-}
+async fn load_runtime(
+    path: PathBuf,
+    quant: usize,
+    quant_nf4: usize,
+) -> Result<(
+    JobRuntime<InferInput, InferOutput<f16>>,
+    Arc<dyn ModelState + Send + Sync>,
+)> {
+    let file = File::open(path)?;
+    let data = unsafe { Mmap::map(&file)? };
 
-#[pyclass]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ModelVersion {
-    V4,
-    V5,
-    V6,
-}
+    let model = SafeTensors::deserialize(&data)?;
+    let info = Loader::info(&model)?;
 
-impl From<web_rwkv::model::ModelVersion> for ModelVersion {
-    fn from(value: web_rwkv::model::ModelVersion) -> Self {
-        match value {
-            web_rwkv::model::ModelVersion::V4 => Self::V4,
-            web_rwkv::model::ModelVersion::V5 => Self::V5,
-            web_rwkv::model::ModelVersion::V6 => Self::V6,
+    let context = create_context(&info).await?;
+    let quant = (0..quant).map(|layer| (layer, Quant::Int8)).collect_vec();
+    let quant_nf4 = (0..quant_nf4)
+        .map(|layer| (layer, Quant::NF4))
+        .collect_vec();
+    let quant = quant.into_iter().chain(quant_nf4).collect();
+
+    match info.version {
+        ModelVersion::V4 => {
+            let builder = ModelBuilder::new(&context, model).with_quant(quant);
+            let builder = Build::<v4::ModelJobBuilder<f16>>::build(builder).await?;
+            let state: Arc<dyn ModelState + Send + Sync> = Arc::new(builder.state());
+            Ok((JobRuntime::new(builder).await, state))
+        }
+        ModelVersion::V5 => {
+            let builder = ModelBuilder::new(&context, model).with_quant(quant);
+            let builder = Build::<v5::ModelJobBuilder<f16>>::build(builder).await?;
+            let state: Arc<dyn ModelState + Send + Sync> = Arc::new(builder.state());
+            Ok((JobRuntime::new(builder).await, state))
+        }
+        ModelVersion::V6 => {
+            let builder = ModelBuilder::new(&context, model).with_quant(quant);
+            let builder = Build::<v6::ModelJobBuilder<f16>>::build(builder).await?;
+            let state: Arc<dyn ModelState + Send + Sync> = Arc::new(builder.state());
+            Ok((JobRuntime::new(builder).await, state))
         }
     }
 }
 
 #[pymethods]
-impl ModelVersion {
-    #[pyo3(name = "__str__")]
-    pub fn str(&self) -> String {
-        format!("{:?}", self)
+impl Model {
+    #[new]
+    #[pyo3(signature = (path, quant=0, quant_nf4=0))]
+    pub fn new(path: PathBuf, quant: usize, quant_nf4: usize) -> PyResult<Self> {
+        let tokio = Arc::new(tokio::runtime::Runtime::new()?);
+        let handle = tokio.spawn(load_runtime(path, quant, quant_nf4));
+        let (runtime, state) = handle.block_on().map_err(err)?.map_err(err)?;
+        let id = Arc::new(Mutex::new(uid::Id::new()));
+        Ok(Self {
+            tokio,
+            runtime,
+            state,
+            id,
+        })
+    }
+
+    #[pyo3(signature = (tokens, state=None, token_chunk_size=128))]
+    pub fn run(
+        &self,
+        tokens: Vec<u16>,
+        state: Option<State>,
+        token_chunk_size: usize,
+    ) -> (Vec<f32>, State) {
+        let state = state.unwrap_or_else(|| {
+            let backed = self.state.init();
+            let id = uid::Id::new();
+            State { id, backed }
+        });
+        todo!()
     }
 }
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StateId;
 
 #[pyclass]
-#[derive(Debug, Clone, Copy)]
-pub struct ModelInfo {
-    #[pyo3(get)]
-    pub version: ModelVersion,
-    #[pyo3(get)]
-    pub num_layer: usize,
-    #[pyo3(get)]
-    pub num_emb: usize,
-    #[pyo3(get)]
-    pub num_hidden: usize,
-    #[pyo3(get)]
-    pub num_vocab: usize,
-    #[pyo3(get)]
-    pub num_head: usize,
-}
-
-impl From<web_rwkv::model::ModelInfo> for ModelInfo {
-    fn from(value: web_rwkv::model::ModelInfo) -> Self {
-        let web_rwkv::model::ModelInfo {
-            version,
-            num_layer,
-            num_emb,
-            num_hidden,
-            num_vocab,
-            num_head,
-        } = value;
-        Self {
-            version: version.into(),
-            num_layer,
-            num_emb,
-            num_hidden,
-            num_vocab,
-            num_head,
-        }
-    }
-}
-
-#[pymethods]
-impl ModelInfo {
-    #[pyo3(name = "__str__")]
-    pub fn str(&self) -> String {
-        format!("{:#?}", self)
-    }
-}
-
-#[pyfunction]
-fn peek_info(file: PathBuf) -> PyResult<ModelInfo> {
-    let info = || -> Result<ModelInfo> {
-        let file = File::open(file)?;
-        let map = unsafe { Mmap::map(&file)? };
-        Ok(Loader::info(&map)?.into())
-    };
-    info().map_err(err)
+#[derive(Debug, Clone)]
+pub struct State {
+    id: uid::Id<StateId>,
+    backed: TensorCpu<f32>,
 }
 
 #[pymodule]
-fn web_rwkv_py(py: Python, module: &PyModule) -> PyResult<()> {
-    module.add_class::<ModelVersion>()?;
-    module.add_class::<ModelInfo>()?;
-    module.add_function(wrap_pyfunction!(peek_info, module)?)?;
-
-    macro_rules! add_module {
-        ($ver:ident) => {
-            let submodule = PyModule::new(py, stringify!($ver))?;
-            submodule.add_class::<$ver::Model>()?;
-            submodule.add_class::<$ver::ModelState>()?;
-            submodule.add_class::<$ver::BackedState>()?;
-            submodule.add_function(wrap_pyfunction!($ver::run_one, submodule)?)?;
-            submodule.add_function(wrap_pyfunction!($ver::run_one_full, submodule)?)?;
-            module.add_submodule(submodule)?;
-        };
-    }
-
-    add_module!(v4);
-    add_module!(v5);
-    add_module!(v6);
+fn web_rwkv_py(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<Model>()?;
+    module.add_class::<State>()?;
 
     Ok(())
 }
