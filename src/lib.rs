@@ -1,19 +1,55 @@
-use std::{fs::File, path::PathBuf};
+use std::{
+    fs::File,
+    io::{BufReader, Read},
+    path::PathBuf,
+    sync::{Arc, Weak},
+};
 
-use anyhow::Result;
+use anyhow::{bail, Result};
+use derivative::Derivative;
+use half::f16;
+use itertools::Itertools;
 use memmap2::Mmap;
+use pollster::FutureExt;
 use pyo3::{exceptions::PyValueError, prelude::*};
+use safetensors::SafeTensors;
+use tokio::sync::RwLock;
 use web_rwkv::{
     context::{Context, ContextBuilder, Instance},
-    model::loader::Loader,
+    runtime::{
+        infer::{InferInput, InferInputBatch, InferOption, InferOutput},
+        loader::Loader,
+        model::{
+            Build, ContextAutoLimits, ModelBuilder, ModelInfo, ModelRuntime, ModelVersion, Quant,
+            State as ModelState,
+        },
+        v4, v5, v6, JobRuntime, Submission,
+    },
+    tensor::{TensorCpu, TensorInit, TensorShape},
     wgpu,
 };
 
-mod v4;
-mod v5;
-mod v6;
+pub mod info;
 
-async fn create_context(info: &web_rwkv::model::ModelInfo) -> Result<Context> {
+fn err(err: impl ToString) -> PyErr {
+    PyValueError::new_err(err.to_string())
+}
+
+/// A model with runtime.
+#[pyclass]
+#[derive(Clone, Derivative)]
+#[derivative(Debug)]
+pub struct Model {
+    tokio: Arc<tokio::runtime::Runtime>,
+    runtime: JobRuntime<InferInput, InferOutput<f16>>,
+    info: Arc<ModelInfo>,
+
+    #[derivative(Debug = "ignore")]
+    state: Arc<dyn ModelState + Send + Sync>,
+    backed: Arc<RwLock<CachedState>>,
+}
+
+async fn create_context(info: &ModelInfo) -> Result<Context> {
     let instance = Instance::new();
     let adapter = instance
         .adapter(wgpu::PowerPreference::HighPerformance)
@@ -22,117 +58,274 @@ async fn create_context(info: &web_rwkv::model::ModelInfo) -> Result<Context> {
         .with_auto_limits(info)
         .build()
         .await?;
-    println!("{:#?}", context.adapter.get_info());
     Ok(context)
 }
 
-fn err(err: impl ToString) -> PyErr {
-    PyValueError::new_err(err.to_string())
-}
+async fn load_runtime(
+    path: PathBuf,
+    quant: usize,
+    quant_nf4: usize,
+) -> Result<(
+    JobRuntime<InferInput, InferOutput<f16>>,
+    Arc<ModelInfo>,
+    Arc<dyn ModelState + Send + Sync>,
+)> {
+    let file = File::open(path)?;
+    let data = unsafe { Mmap::map(&file)? };
 
-#[pyclass]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ModelVersion {
-    V4,
-    V5,
-    V6,
-}
+    let model = SafeTensors::deserialize(&data)?;
+    let info = Loader::info(&model)?;
 
-impl From<web_rwkv::model::ModelVersion> for ModelVersion {
-    fn from(value: web_rwkv::model::ModelVersion) -> Self {
-        match value {
-            web_rwkv::model::ModelVersion::V4 => Self::V4,
-            web_rwkv::model::ModelVersion::V5 => Self::V5,
-            web_rwkv::model::ModelVersion::V6 => Self::V6,
+    let context = create_context(&info).await?;
+    let quant = (0..quant).map(|layer| (layer, Quant::Int8)).collect_vec();
+    let quant_nf4 = (0..quant_nf4)
+        .map(|layer| (layer, Quant::NF4))
+        .collect_vec();
+    let quant = quant.into_iter().chain(quant_nf4).collect();
+
+    match info.version {
+        ModelVersion::V4 => {
+            let builder = ModelBuilder::new(&context, model).with_quant(quant);
+            let builder = Build::<v4::ModelJobBuilder<f16>>::build(builder).await?;
+            let info = Arc::new(builder.info());
+            let state: Arc<dyn ModelState + Send + Sync> = Arc::new(builder.state());
+            Ok((JobRuntime::new(builder).await, info, state))
+        }
+        ModelVersion::V5 => {
+            let builder = ModelBuilder::new(&context, model).with_quant(quant);
+            let builder = Build::<v5::ModelJobBuilder<f16>>::build(builder).await?;
+            let info = Arc::new(builder.info());
+            let state: Arc<dyn ModelState + Send + Sync> = Arc::new(builder.state());
+            Ok((JobRuntime::new(builder).await, info, state))
+        }
+        ModelVersion::V6 => {
+            let builder = ModelBuilder::new(&context, model).with_quant(quant);
+            let builder = Build::<v6::ModelJobBuilder<f16>>::build(builder).await?;
+            let info = Arc::new(builder.info());
+            let state: Arc<dyn ModelState + Send + Sync> = Arc::new(builder.state());
+            Ok((JobRuntime::new(builder).await, info, state))
         }
     }
 }
 
 #[pymethods]
-impl ModelVersion {
-    #[pyo3(name = "__str__")]
-    pub fn str(&self) -> String {
-        format!("{:?}", self)
+impl Model {
+    #[new]
+    #[pyo3(signature = (path, quant=0, quant_nf4=0))]
+    pub fn new(path: PathBuf, quant: usize, quant_nf4: usize) -> PyResult<Self> {
+        let tokio = Arc::new(tokio::runtime::Runtime::new()?);
+        let handle = tokio.spawn(load_runtime(path, quant, quant_nf4));
+        let (runtime, info, state) = handle.block_on().map_err(err)?.map_err(err)?;
+        let backed = Arc::new(RwLock::new(CachedState::new()));
+        Ok(Self {
+            tokio,
+            runtime,
+            info,
+            state,
+            backed,
+        })
+    }
+
+    pub fn info(&self) -> info::ModelInfo {
+        self.info.as_ref().clone().into()
+    }
+
+    pub fn clone_state(&self, state: &State) -> PyResult<State> {
+        let handle = self.tokio.spawn(clone_state(self.clone(), state.clone()));
+        let state = handle.block_on().map_err(err)?.map_err(err)?;
+        Ok(state)
+    }
+
+    #[pyo3(signature = (tokens, state=None, token_chunk_size=128))]
+    pub fn run(
+        &self,
+        tokens: Vec<u16>,
+        state: Option<State>,
+        token_chunk_size: usize,
+    ) -> PyResult<(Vec<f32>, State)> {
+        let state = state.unwrap_or_else(|| {
+            let tensor = Arc::new(RwLock::new(self.state.init()));
+            let id = uid::Id::new();
+            State { id, tensor }
+        });
+
+        let handle = self.tokio.spawn(run_internal(
+            self.clone(),
+            tokens,
+            state.clone(),
+            InferOption::Last,
+            token_chunk_size,
+        ));
+        let output = handle.block_on().map_err(err)?.map_err(err)?;
+        assert_eq!(output.shape()[1], 1);
+        Ok((output.map(|x| x.to_f32()).to_vec(), state))
+    }
+
+    #[pyo3(signature = (tokens, state=None, token_chunk_size=128))]
+    pub fn run_full(
+        &self,
+        tokens: Vec<u16>,
+        state: Option<State>,
+        token_chunk_size: usize,
+    ) -> PyResult<(Vec<Vec<f32>>, State)> {
+        let state = state.unwrap_or_else(|| {
+            let tensor = Arc::new(RwLock::new(self.state.init()));
+            let id = uid::Id::new();
+            State { id, tensor }
+        });
+
+        let handle = self.tokio.spawn(run_internal(
+            self.clone(),
+            tokens,
+            state.clone(),
+            InferOption::Full,
+            token_chunk_size,
+        ));
+        let output = handle.block_on().map_err(err)?.map_err(err)?;
+        let output = output.map(|x| x.to_f32()).split(1).map_err(err)?;
+        let output = output.into_iter().map(Vec::from).collect();
+        Ok((output, state))
     }
 }
 
-#[pyclass]
-#[derive(Debug, Clone, Copy)]
-pub struct ModelInfo {
-    #[pyo3(get)]
-    pub version: ModelVersion,
-    #[pyo3(get)]
-    pub num_layer: usize,
-    #[pyo3(get)]
-    pub num_emb: usize,
-    #[pyo3(get)]
-    pub num_hidden: usize,
-    #[pyo3(get)]
-    pub num_vocab: usize,
-    #[pyo3(get)]
-    pub num_head: usize,
+async fn run_internal(
+    model: Model,
+    tokens: Vec<u16>,
+    state: State,
+    option: InferOption,
+    token_chunk_size: usize,
+) -> Result<TensorCpu<f16>> {
+    if tokens.is_empty() {
+        bail!("input tokens cannot be empty")
+    }
+
+    {
+        let mut backed = model.backed.write().await;
+        if backed.id != state.id {
+            // we need to first back the old cached state
+            if let Some(tensor) = backed.tensor.upgrade() {
+                let mut tensor = tensor.write().await;
+                *tensor = model.state.back(0).await?;
+            }
+
+            // then we load the new one
+            *backed = state.clone().into();
+            let tensor = state.tensor.read().await;
+            model.state.load(0, tensor.clone())?;
+        }
+    }
+
+    let mut inference = Some(InferInput::new(
+        vec![InferInputBatch { tokens, option }],
+        token_chunk_size,
+    ));
+    let mut data = vec![];
+    let mut num_token = 0;
+    loop {
+        let input = inference.take().unwrap();
+        if input.batches[0].tokens.is_empty() {
+            break;
+        }
+
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let submission = Submission { input, sender };
+
+        let _ = model.runtime.send(submission).await;
+        let (input, output) = receiver.await?;
+        inference = Some(input);
+
+        num_token += output[0].0.shape()[1];
+        let mut output = output[0].clone().to_vec();
+        data.append(&mut output);
+    }
+
+    let num_vocab = model.info.num_vocab;
+    let tensor = TensorCpu::from_data([num_vocab, num_token, 1, 1], data)?;
+    Ok(tensor)
 }
 
-impl From<web_rwkv::model::ModelInfo> for ModelInfo {
-    fn from(value: web_rwkv::model::ModelInfo) -> Self {
-        let web_rwkv::model::ModelInfo {
-            version,
-            num_layer,
-            num_emb,
-            num_hidden,
-            num_vocab,
-            num_head,
-        } = value;
+async fn clone_state(model: Model, state: State) -> Result<State> {
+    let backed = model.backed.read().await;
+    if backed.id != state.id {
+        // data is already backed and stored in `state`
+        let id = uid::Id::new();
+        let tensor = state.tensor.clone();
+        Ok(State { id, tensor })
+    } else {
+        // data is not in `state`, but still on the GPU
+        let id = uid::Id::new();
+        let tensor = model.state.back(0).await?;
+        let tensor = Arc::new(RwLock::new(tensor));
+        Ok(State { id, tensor })
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StateId;
+
+#[pyclass]
+#[derive(Debug, Clone)]
+pub struct State {
+    id: uid::Id<StateId>,
+    tensor: Arc<RwLock<TensorCpu<f32>>>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedState {
+    id: uid::Id<StateId>,
+    tensor: Weak<RwLock<TensorCpu<f32>>>,
+}
+
+impl CachedState {
+    pub fn new() -> Self {
         Self {
-            version: version.into(),
-            num_layer,
-            num_emb,
-            num_hidden,
-            num_vocab,
-            num_head,
+            id: uid::Id::new(),
+            tensor: Weak::new(),
         }
     }
 }
 
-#[pymethods]
-impl ModelInfo {
-    #[pyo3(name = "__str__")]
-    pub fn str(&self) -> String {
-        format!("{:#?}", self)
+impl From<State> for CachedState {
+    fn from(State { id, tensor }: State) -> Self {
+        let tensor = Arc::downgrade(&tensor);
+        Self { id, tensor }
     }
 }
 
-#[pyfunction]
-fn peek_info(file: PathBuf) -> PyResult<ModelInfo> {
-    let info = || -> Result<ModelInfo> {
-        let file = File::open(file)?;
-        let map = unsafe { Mmap::map(&file)? };
-        Ok(Loader::info(&map)?.into())
-    };
-    info().map_err(err)
+fn load_tokenizer(path: PathBuf) -> Result<web_rwkv::tokenizer::Tokenizer> {
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut contents = String::new();
+    reader.read_to_string(&mut contents)?;
+    Ok(web_rwkv::tokenizer::Tokenizer::new(&contents)?)
+}
+
+#[pyclass]
+pub struct Tokenizer(web_rwkv::tokenizer::Tokenizer);
+
+#[pymethods]
+impl Tokenizer {
+    #[new]
+    pub fn new(path: PathBuf) -> PyResult<Self> {
+        Ok(Self(load_tokenizer(path).map_err(err)?))
+    }
+
+    pub fn encode(&self, text: &str) -> PyResult<Vec<u16>> {
+        self.0.encode(text.as_bytes()).map_err(err)
+    }
+
+    pub fn decode(&self, tokens: Vec<u16>) -> PyResult<Vec<u8>> {
+        self.0.decode(&tokens).map_err(err)
+    }
 }
 
 #[pymodule]
-fn web_rwkv_py(py: Python, module: &PyModule) -> PyResult<()> {
-    module.add_class::<ModelVersion>()?;
-    module.add_class::<ModelInfo>()?;
-    module.add_function(wrap_pyfunction!(peek_info, module)?)?;
-
-    macro_rules! add_module {
-        ($ver:ident) => {
-            let submodule = PyModule::new(py, stringify!($ver))?;
-            submodule.add_class::<$ver::Model>()?;
-            submodule.add_class::<$ver::ModelState>()?;
-            submodule.add_class::<$ver::BackedState>()?;
-            submodule.add_function(wrap_pyfunction!($ver::run_one, submodule)?)?;
-            submodule.add_function(wrap_pyfunction!($ver::run_one_full, submodule)?)?;
-            module.add_submodule(submodule)?;
-        };
-    }
-
-    add_module!(v4);
-    add_module!(v5);
-    add_module!(v6);
+fn web_rwkv_py(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<Model>()?;
+    module.add_class::<State>()?;
+    module.add_class::<Tokenizer>()?;
+    module.add_class::<info::ModelInfo>()?;
+    module.add_class::<info::ModelVersion>()?;
 
     Ok(())
 }

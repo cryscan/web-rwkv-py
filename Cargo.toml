@@ -1,18 +1,23 @@
 [package]
-name = "web-rwkv-py"
-version = "0.1.4"
 edition = "2021"
+name = "web-rwkv-py"
+version = "0.2.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
-name = "web_rwkv_py"
 crate-type = ["cdylib"]
+name = "web_rwkv_py"
 
 [dependencies]
-web-rwkv = "0.6.8"
-web-rwkv-derive = "0.2.0"
 anyhow = "1"
-pyo3 = "0.20.0"
-pollster = "0.3.0"
-memmap2 = "0.9"
+derivative = "2.2.0"
+half = { version = "2.2", features = ["bytemuck", "serde"] }
 itertools = "0.12"
+memmap2 = "0.9"
+pollster = "0.3.0"
+pyo3 = "0.21.2"
+safetensors = "0.4"
+tokio = "1.37"
+uid = "0.1.7"
+web-rwkv = "0.7.3"
+web-rwkv-derive = "0.2.0"
