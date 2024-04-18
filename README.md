@@ -16,7 +16,7 @@ Python binding for [`web-rwkv`](https://github.com/cryscan/web-rwkv).
 4. Build and install:
 
    ```bash
-   $ maturin develop
+   $ maturin develop --release
    ```
 
 5. Try using `web-rwkv` in python:
@@ -24,35 +24,32 @@ Python binding for [`web-rwkv`](https://github.com/cryscan/web-rwkv).
    ```python
    import web_rwkv_py as wrp
 
-   model = wrp.v5.Model(
+   model = wrp.Model(
       "/path/to/model.st", # model path
       quant=0,             # int8 quantization layers
       quant_nf4=0,         # nf4 quantization layers
-      turbo=True,          # faster when reading long prompts
-      token_chunk_size=256 # maximum tokens in an inference chunk (can be 32, 64, 256, 1024, etc.)
    )
-   logits, state = wrp.v5.run(model, [114, 514], state=None)
+   logits, state = model.run([114, 514], state=None)
    ```
    
 # Advanced Usage
-1. Move state to host memory:
-   
-   ```python
-   logits, state = wrp.v5.run(model, [114, 514], state=None) # returned state is on vram
-   state_cpu = state.back()
-   ```
-   
-2. Load state from host memory:
-   
-   ```python
-   state = wrp.v5.ModelState(model, 1)
-   state.load(state_cpu)
-   logits, state = wrp.v5.run(model, [114, 514], state=state_cpu)
-   ```
-   
-3. Return predictions of all tokens (not only the last's):
+1. Clone states:
 
    ```python
-   logits, state = wrp.v5.run_full(model, [114, 514], state=None)
-   len(logits) # 2
+   logits, state = model.run([114, 514], state=None)
+   state_cloned = model.clone_state(state)
+   ```
+   
+2. Return predictions of all tokens (not only the last's):
+
+   ```python
+   logits, state = model.run_full([114, 514, 1919, 810], state=None)
+   assert(len(logits) == 4)
+   ```
+
+3. Specify token chunk size (default is 128, the larger the faster prefilling is, but you will need a beefy GPU):
+
+   ```python
+   tokens = [114, 514, 1919, 810]
+   logits, state = model.run_full(tokens, state=None, token_chunk_size=256)
    ```
