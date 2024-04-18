@@ -31,14 +31,14 @@ Python binding for [`web-rwkv`](https://github.com/cryscan/web-rwkv).
       turbo=True,          # faster when reading long prompts
       token_chunk_size=256 # maximum tokens in an inference chunk (can be 32, 64, 256, 1024, etc.)
    )
-   logits, state = wrp.v5.run_one(model, [114, 514], state=None)
+   logits, state = wrp.v5.run(model, [114, 514], state=None)
    ```
    
 # Advanced Usage
 1. Move state to host memory:
    
    ```python
-   logits, state = wrp.v5.run_one(model, [114, 514], state=None) # returned state is on vram
+   logits, state = wrp.v5.run(model, [114, 514], state=None) # returned state is on vram
    state_cpu = state.back()
    ```
    
@@ -47,12 +47,12 @@ Python binding for [`web-rwkv`](https://github.com/cryscan/web-rwkv).
    ```python
    state = wrp.v5.ModelState(model, 1)
    state.load(state_cpu)
-   logits, state = wrp.v5.run_one(model, [114, 514], state=state_cpu)
+   logits, state = wrp.v5.run(model, [114, 514], state=state_cpu)
    ```
    
 3. Return predictions of all tokens (not only the last's):
 
    ```python
-   logits, state = wrp.v5.run_one_full(model, [114, 514], state=None)
+   logits, state = wrp.v5.run_full(model, [114, 514], state=None)
    len(logits) # 2
    ```
