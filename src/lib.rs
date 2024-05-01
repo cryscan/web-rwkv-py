@@ -1,8 +1,9 @@
 use std::{
+    collections::{HashMap, HashSet},
     fs::File,
     io::{BufReader, Read},
     path::PathBuf,
-    sync::{Arc, Weak},
+    sync::Arc,
 };
 
 use anyhow::{bail, Result};
@@ -46,7 +47,44 @@ pub struct Model {
 
     #[derivative(Debug = "ignore")]
     state: Arc<dyn ModelState + Send + Sync>,
-    backed: Arc<RwLock<CachedState>>,
+    backed: Arc<RwLock<StateCache>>,
+}
+
+#[derive(Debug, Default)]
+struct StateCache {
+    active: Option<StateId>,
+    map: HashMap<StateId, TensorCpu<f32>>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct _StateId;
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
+pub struct StateId(Arc<uid::Id<_StateId>>);
+
+impl StateId {
+    pub fn new() -> Self {
+        Self(Arc::new(uid::Id::new()))
+    }
+
+    pub fn strong_count(&self) -> usize {
+        Arc::strong_count(&self.0)
+    }
+}
+
+impl std::ops::Deref for StateId {
+    type Target = uid::Id<_StateId>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[pyclass]
+#[derive(Debug, Clone)]
+pub struct State {
+    id: StateId,
+    tensor: TensorCpu<f32>,
 }
 
 async fn create_context(info: &ModelInfo) -> Result<Context> {
@@ -55,7 +93,7 @@ async fn create_context(info: &ModelInfo) -> Result<Context> {
         .adapter(wgpu::PowerPreference::HighPerformance)
         .await?;
     let context = ContextBuilder::new(adapter)
-        .with_auto_limits(info)
+        .auto_limits(info)
         .build()
         .await?;
     Ok(context)
@@ -85,23 +123,26 @@ async fn load_runtime(
 
     match info.version {
         ModelVersion::V4 => {
-            let builder = ModelBuilder::new(&context, model).with_quant(quant);
-            let builder = Build::<v4::ModelJobBuilder<f16>>::build(builder).await?;
-            let info = Arc::new(builder.info());
+            let builder = ModelBuilder::new(&context, model).quant(quant);
+            let model = Build::<v4::Model>::build(builder).await?;
+            let info = Arc::new(model.info.clone());
+            let builder = v4::ModelJobBuilder::new(model, 1);
             let state: Arc<dyn ModelState + Send + Sync> = Arc::new(builder.state());
             Ok((JobRuntime::new(builder).await, info, state))
         }
         ModelVersion::V5 => {
-            let builder = ModelBuilder::new(&context, model).with_quant(quant);
-            let builder = Build::<v5::ModelJobBuilder<f16>>::build(builder).await?;
-            let info = Arc::new(builder.info());
+            let builder = ModelBuilder::new(&context, model).quant(quant);
+            let model = Build::<v5::Model>::build(builder).await?;
+            let info = Arc::new(model.info.clone());
+            let builder = v5::ModelJobBuilder::new(model, 1);
             let state: Arc<dyn ModelState + Send + Sync> = Arc::new(builder.state());
             Ok((JobRuntime::new(builder).await, info, state))
         }
         ModelVersion::V6 => {
-            let builder = ModelBuilder::new(&context, model).with_quant(quant);
-            let builder = Build::<v6::ModelJobBuilder<f16>>::build(builder).await?;
-            let info = Arc::new(builder.info());
+            let builder = ModelBuilder::new(&context, model).quant(quant);
+            let model = Build::<v6::Model>::build(builder).await?;
+            let info = Arc::new(model.info.clone());
+            let builder = v6::ModelJobBuilder::new(model, 1);
             let state: Arc<dyn ModelState + Send + Sync> = Arc::new(builder.state());
             Ok((JobRuntime::new(builder).await, info, state))
         }
@@ -116,7 +157,7 @@ impl Model {
         let tokio = Arc::new(tokio::runtime::Runtime::new()?);
         let handle = tokio.spawn(load_runtime(path, quant, quant_nf4));
         let (runtime, info, state) = handle.block_on().map_err(err)?.map_err(err)?;
-        let backed = Arc::new(RwLock::new(CachedState::new()));
+        let backed = Arc::new(RwLock::new(StateCache::default()));
         Ok(Self {
             tokio,
             runtime,
@@ -130,8 +171,18 @@ impl Model {
         self.info.as_ref().clone().into()
     }
 
+    pub fn init_state(&self) -> State {
+        let id = StateId::new();
+        let tensor = self.state.init();
+        State { id, tensor }
+    }
+
     pub fn clone_state(&self, state: &State) -> PyResult<State> {
-        let handle = self.tokio.spawn(clone_state(self.clone(), state.clone()));
+        let model = self.clone();
+        let state = state.clone();
+        let handle = self
+            .tokio
+            .spawn(async move { model.back_state(state).await });
         let state = handle.block_on().map_err(err)?.map_err(err)?;
         Ok(state)
     }
@@ -140,155 +191,138 @@ impl Model {
     pub fn run(
         &self,
         tokens: Vec<u16>,
-        state: Option<State>,
+        state: Option<&State>,
         token_chunk_size: usize,
     ) -> PyResult<(Vec<f32>, State)> {
-        let state = state.unwrap_or_else(|| {
-            let tensor = Arc::new(RwLock::new(self.state.init()));
-            let id = uid::Id::new();
-            State { id, tensor }
-        });
-
-        let handle = self.tokio.spawn(run_internal(
-            self.clone(),
-            tokens,
-            state.clone(),
-            InferOption::Last,
-            token_chunk_size,
-        ));
-        let output = handle.block_on().map_err(err)?.map_err(err)?;
-        assert_eq!(output.shape()[1], 1);
-        Ok((output.map(|x| x.to_f32()).to_vec(), state))
+        let handle = {
+            let model = self.clone();
+            let state = state.cloned().unwrap_or_else(|| self.init_state());
+            let option = InferOption::Last;
+            self.tokio.spawn(async move {
+                let output = model
+                    .run_internal(tokens, state, option, token_chunk_size)
+                    .await;
+                model.clear_cache().await;
+                output
+            })
+        };
+        let (output, state) = handle.block_on().map_err(err)?.map_err(err)?;
+        let output = output.map(|x| x.to_f32()).to_vec();
+        Ok((output, state))
     }
 
     #[pyo3(signature = (tokens, state=None, token_chunk_size=128))]
     pub fn run_full(
         &self,
         tokens: Vec<u16>,
-        state: Option<State>,
+        state: Option<&State>,
         token_chunk_size: usize,
-    ) -> PyResult<(Vec<Vec<f32>>, State)> {
-        let state = state.unwrap_or_else(|| {
-            let tensor = Arc::new(RwLock::new(self.state.init()));
-            let id = uid::Id::new();
-            State { id, tensor }
-        });
-
-        let handle = self.tokio.spawn(run_internal(
-            self.clone(),
-            tokens,
-            state.clone(),
-            InferOption::Full,
-            token_chunk_size,
-        ));
-        let output = handle.block_on().map_err(err)?.map_err(err)?;
-        let output = output.map(|x| x.to_f32()).split(1).map_err(err)?;
-        let output = output.into_iter().map(Vec::from).collect();
+    ) -> PyResult<(Vec<f32>, State)> {
+        let handle = {
+            let model = self.clone();
+            let state = state.cloned().unwrap_or_else(|| self.init_state());
+            let option = InferOption::Full;
+            self.tokio.spawn(async move {
+                let output = model
+                    .run_internal(tokens, state, option, token_chunk_size)
+                    .await;
+                model.clear_cache().await;
+                output
+            })
+        };
+        let (output, state) = handle.block_on().map_err(err)?.map_err(err)?;
+        // let output = output.map(|x| x.to_f32()).split(1).map_err(err)?;
+        // let output = output.into_iter().map(Vec::from).collect();
+        let output = output.map(|x| x.to_f32()).to_vec();
         Ok((output, state))
     }
 }
 
-async fn run_internal(
-    model: Model,
-    tokens: Vec<u16>,
-    state: State,
-    option: InferOption,
-    token_chunk_size: usize,
-) -> Result<TensorCpu<f16>> {
-    if tokens.is_empty() {
-        bail!("input tokens cannot be empty")
-    }
+impl Model {
+    async fn run_internal(
+        &self,
+        tokens: Vec<u16>,
+        state: State,
+        option: InferOption,
+        token_chunk_size: usize,
+    ) -> Result<(TensorCpu<f16>, State)> {
+        if tokens.is_empty() {
+            bail!("input tokens cannot be empty")
+        }
 
-    {
-        let mut backed = model.backed.write().await;
-        if backed.id != state.id {
-            // we need to first back the old cached state
-            if let Some(tensor) = backed.tensor.upgrade() {
-                let mut tensor = tensor.write().await;
-                *tensor = model.state.back(0).await?;
+        let mut backed = self.backed.write().await;
+        let state = {
+            if Some(state.id.clone()) != backed.active {
+                // the input state is not the active state on the gpu
+                // we need to back the active gpu state and put it in the cache
+                let tensor = self.state.back(0).await?;
+                backed.map.insert(state.id.clone(), tensor);
+
+                // then load the input state
+                let tensor = match backed.map.get(&state.id) {
+                    Some(tensor) => tensor.clone(),
+                    None => state.tensor.clone(),
+                };
+                self.state.load(0, tensor)?;
             }
 
-            // then we load the new one
-            *backed = state.clone().into();
-            let tensor = state.tensor.read().await;
-            model.state.load(0, tensor.clone())?;
+            let state = State {
+                id: StateId::new(),
+                tensor: state.tensor,
+            };
+            backed.active = Some(state.id.clone());
+            state
+        };
+
+        let mut inference = Some(InferInput::new(
+            vec![InferInputBatch { tokens, option }],
+            token_chunk_size,
+        ));
+        let mut data = vec![];
+        let mut num_token = 0;
+        loop {
+            let input = inference.take().unwrap();
+            if input.batches[0].tokens.is_empty() {
+                break;
+            }
+
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            let submission = Submission { input, sender };
+
+            let _ = self.runtime.send(submission).await;
+            let (input, output) = receiver.await?;
+            inference = Some(input);
+
+            num_token += output[0].0.shape()[1];
+            let mut output = output[0].clone().to_vec();
+            data.append(&mut output);
         }
+
+        let num_vocab = self.info.num_vocab;
+        let tensor = TensorCpu::from_data([num_vocab, num_token, 1, 1], data)?;
+        Ok((tensor, state))
     }
 
-    let mut inference = Some(InferInput::new(
-        vec![InferInputBatch { tokens, option }],
-        token_chunk_size,
-    ));
-    let mut data = vec![];
-    let mut num_token = 0;
-    loop {
-        let input = inference.take().unwrap();
-        if input.batches[0].tokens.is_empty() {
-            break;
-        }
-
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        let submission = Submission { input, sender };
-
-        let _ = model.runtime.send(submission).await;
-        let (input, output) = receiver.await?;
-        inference = Some(input);
-
-        num_token += output[0].0.shape()[1];
-        let mut output = output[0].clone().to_vec();
-        data.append(&mut output);
-    }
-
-    let num_vocab = model.info.num_vocab;
-    let tensor = TensorCpu::from_data([num_vocab, num_token, 1, 1], data)?;
-    Ok(tensor)
-}
-
-async fn clone_state(model: Model, state: State) -> Result<State> {
-    let backed = model.backed.read().await;
-    if backed.id != state.id {
-        // data is already backed and stored in `state`
-        let id = uid::Id::new();
-        let tensor = state.tensor.clone();
-        Ok(State { id, tensor })
-    } else {
-        // data is not in `state`, but still on the GPU
-        let id = uid::Id::new();
-        let tensor = model.state.back(0).await?;
-        let tensor = Arc::new(RwLock::new(tensor));
+    async fn back_state(&self, state: State) -> Result<State> {
+        let backed = self.backed.read().await;
+        let State { id, tensor } = state;
+        let tensor = match (Some(id.clone()) == backed.active, backed.map.get(&id)) {
+            (true, _) => self.state.back(0).await?,
+            (false, Some(tensor)) => tensor.clone(),
+            (false, None) => tensor,
+        };
         Ok(State { id, tensor })
     }
-}
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct StateId;
-
-#[pyclass]
-#[derive(Debug, Clone)]
-pub struct State {
-    id: uid::Id<StateId>,
-    tensor: Arc<RwLock<TensorCpu<f32>>>,
-}
-
-#[derive(Debug, Clone)]
-struct CachedState {
-    id: uid::Id<StateId>,
-    tensor: Weak<RwLock<TensorCpu<f32>>>,
-}
-
-impl CachedState {
-    pub fn new() -> Self {
-        Self {
-            id: uid::Id::new(),
-            tensor: Weak::new(),
-        }
-    }
-}
-
-impl From<State> for CachedState {
-    fn from(State { id, tensor }: State) -> Self {
-        let tensor = Arc::downgrade(&tensor);
-        Self { id, tensor }
+    async fn clear_cache(&self) {
+        let mut backed = self.backed.write().await;
+        let retain: HashSet<_> = backed
+            .map
+            .keys()
+            .filter(|k| k.strong_count() > 1)
+            .cloned()
+            .collect();
+        backed.map.retain(|x, _| retain.contains(x));
     }
 }
 

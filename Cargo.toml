@@ -1,7 +1,7 @@
 [package]
 edition = "2021"
 name = "web-rwkv-py"
-version = "0.2.0"
+version = "0.2.1"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
@@ -19,5 +19,5 @@ pyo3 = "0.21.2"
 safetensors = "0.4"
 tokio = "1.37"
 uid = "0.1.7"
-web-rwkv = "0.7.3"
+web-rwkv = "0.7.6"
 web-rwkv-derive = "0.2.0"

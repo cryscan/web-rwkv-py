@@ -14,16 +14,22 @@ state_1 = model.clone_state(state)
 prompt = " located in the city of"
 tokens = tokenizer.encode(prompt)
 print(prompt, end="")
-output, state = model.run(tokens, state)
+output, state_2 = model.run(tokens, state)
 output_token, _ = max(enumerate(output), key=lambda x: x[1])
 
 prompt = " located in the city of"
 tokens = tokenizer.encode(prompt)
-output, _ = model.run_full(tokens, state_1)
-output = output[-1]
+output, _ = model.run_full(tokens, state)
+output = output[-65536:]
 output_token_1, _ = max(enumerate(output), key=lambda x: x[1])
 
-str = str(bytearray(tokenizer.decode([output_token_1])), encoding='utf-8')
+prompt = " located in the city of"
+tokens = tokenizer.encode(prompt)
+output, _ = model.run(tokens, state_1)
+output_token_2, _ = max(enumerate(output), key=lambda x: x[1])
+
+str = str(bytearray(tokenizer.decode([output_token])), encoding='utf-8')
 print(str)
 
 assert(output_token == output_token_1)
+assert(output_token == output_token_2)
