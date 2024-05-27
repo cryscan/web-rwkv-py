@@ -29,15 +29,21 @@ Python binding for [`web-rwkv`](https://github.com/cryscan/web-rwkv).
       quant=0,             # int8 quantization layers
       quant_nf4=0,         # nf4 quantization layers
    )
-   logits, state = model.run([114, 514], state=None)
+   model.clear_state()
+   logits = model.run([114, 514])
    ```
    
 # Advanced Usage
-1. Clone states:
+1. Get, clone and load current state:
 
    ```python
-   logits, state = model.run([114, 514], state=None)
-   state_cloned = model.clone_state(state)
+   logits = model.run([114, 514])
+   state = model.back_state(wrp.StateDevice.Gpu)
+   # state = model.back_state(wrp.StateDevice.Cpu)
+   state_cloned = state.deep_clone()
+
+   model.load_state(state_cloned)
+   logits = model.run([1919, 810])
    ```
    
 2. Return predictions of all tokens (not only the last's):
@@ -45,11 +51,4 @@ Python binding for [`web-rwkv`](https://github.com/cryscan/web-rwkv).
    ```python
    logits, state = model.run_full([114, 514, 1919, 810], state=None)
    assert(len(logits) == 4)
-   ```
-
-3. Specify token chunk size (default is 128, the larger the faster prefilling is, but you will need a beefy GPU):
-
-   ```python
-   tokens = [114, 514, 1919, 810]
-   logits, state = model.run_full(tokens, state=None, token_chunk_size=256)
    ```
