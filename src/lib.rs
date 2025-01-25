@@ -8,7 +8,6 @@ use std::{
 use anyhow::{bail, Result};
 use derivative::Derivative;
 use half::f16;
-use itertools::Itertools;
 use memmap2::Mmap;
 use pyo3::{exceptions::PyValueError, prelude::*};
 use safetensors::SafeTensors;
@@ -18,10 +17,10 @@ use web_rwkv::{
         infer::{InferInput, InferInputBatch, InferOption, InferOutput},
         loader::Loader,
         model::{
-            Build, ContextAutoLimits, ModelBuilder, ModelInfo, ModelRuntime, ModelVersion, Quant,
-            State as ModelState,
+            ContextAutoLimits, ModelBuilder, ModelInfo, ModelVersion, Quant,
+            State as ModelState, Bundle
         },
-        v4, v5, v6, JobRuntime,
+        v4, v5, v6, v7, TokioRuntime,
     },
     tensor::{
         kind::ReadWrite, DeepClone, TensorCpu, TensorGpu, TensorInit, TensorInto, TensorShape,
@@ -41,9 +40,9 @@ fn err(err: impl ToString) -> PyErr {
 #[derivative(Debug)]
 pub struct Model {
     tokio: Arc<tokio::runtime::Runtime>,
-    info: Arc<ModelInfo>,
+    info: ModelInfo,
     context: Context,
-    runtime: JobRuntime<InferInput, InferOutput>,
+    runtime: TokioRuntime<InferInput, InferOutput>,
     #[derivative(Debug = "ignore")]
     state: Arc<dyn ModelState + Send + Sync>,
 }
@@ -78,7 +77,7 @@ impl State {
         match (self.clone(), device) {
             (Self::Cpu { state }, StateDevice::Gpu) => {
                 let StateCpu(tensor, context) = state;
-                let state = StateGpu(tensor.transfer_into(&context));
+                let state = StateGpu(tensor.to(&context));
                 Self::Gpu { state }
             }
             (Self::Gpu { state }, StateDevice::Cpu) => {
@@ -123,10 +122,11 @@ async fn load_runtime(
     path: PathBuf,
     quant: usize,
     quant_nf4: usize,
+    quant_sf4: usize,
 ) -> Result<(
     Context,
-    Arc<ModelInfo>,
-    JobRuntime<InferInput, InferOutput>,
+    ModelInfo,
+    TokioRuntime<InferInput, InferOutput>,
     Arc<dyn ModelState + Send + Sync>,
 )> {
     let file = File::open(path)?;
@@ -136,36 +136,42 @@ async fn load_runtime(
     let info = Loader::info(&model)?;
 
     let context = create_context(&info).await?;
-    let quant = (0..quant).map(|layer| (layer, Quant::Int8)).collect_vec();
-    let quant_nf4 = (0..quant_nf4)
-        .map(|layer| (layer, Quant::NF4))
-        .collect_vec();
-    let quant = quant.into_iter().chain(quant_nf4).collect();
+    let quant = (0..quant)
+        .map(|layer| (layer, Quant::Int8))
+        .chain((0..quant_nf4).map(|layer| (layer, Quant::NF4)))
+        .chain((0..quant_sf4).map(|layer| (layer, Quant::SF4)))
+        .collect();
+
+    let builder = ModelBuilder::new(&context, model).quant(quant);
 
     match info.version {
         ModelVersion::V4 => {
-            let builder = ModelBuilder::new(&context, model).quant(quant);
-            let model = Build::<v4::Model>::build(builder).await?;
-            let info = Arc::new(model.info.clone());
-            let runtime = v4::ModelRuntime::<f16>::new(model, 1);
-            let state: Arc<dyn ModelState + Send + Sync> = Arc::new(runtime.state());
-            Ok((context, info, JobRuntime::new(runtime).await, state))
+            let model = builder.build_v4().await?;
+            let bundle = v4::Bundle::<f16>::new(model, 1);
+            let state = Arc::new(bundle.state());
+            let runtime = TokioRuntime::new(bundle).await;
+            Ok((context, info, runtime, state))
         }
         ModelVersion::V5 => {
-            let builder = ModelBuilder::new(&context, model).quant(quant);
-            let model = Build::<v5::Model>::build(builder).await?;
-            let info = Arc::new(model.info.clone());
-            let runtime = v5::ModelRuntime::<f16>::new(model, 1);
-            let state: Arc<dyn ModelState + Send + Sync> = Arc::new(runtime.state());
-            Ok((context, info, JobRuntime::new(runtime).await, state))
+            let model = builder.build_v5().await?;
+            let bundle = v5::Bundle::<f16>::new(model, 1);
+            let state = Arc::new(bundle.state());
+            let runtime = TokioRuntime::new(bundle).await;
+            Ok((context, info, runtime, state))
         }
         ModelVersion::V6 => {
-            let builder = ModelBuilder::new(&context, model).quant(quant);
-            let model = Build::<v6::Model>::build(builder).await?;
-            let info = Arc::new(model.info.clone());
-            let runtime = v6::ModelRuntime::<f16>::new(model, 1);
-            let state: Arc<dyn ModelState + Send + Sync> = Arc::new(runtime.state());
-            Ok((context, info, JobRuntime::new(runtime).await, state))
+            let model = builder.build_v6().await?;
+            let bundle = v6::Bundle::<f16>::new(model, 1);
+            let state = Arc::new(bundle.state());
+            let runtime = TokioRuntime::new(bundle).await;
+            Ok((context, info, runtime, state))
+        }
+        ModelVersion::V7 => {
+            let model = builder.build_v7().await?;
+            let bundle = v7::Bundle::<f16>::new(model, 1);
+            let state = Arc::new(bundle.state());
+            let runtime = TokioRuntime::new(bundle).await;
+            Ok((context, info, runtime, state))
         }
     }
 }
@@ -173,11 +179,11 @@ async fn load_runtime(
 #[pymethods]
 impl Model {
     #[new]
-    #[pyo3(signature = (path, quant=0, quant_nf4=0))]
-    pub fn new(path: PathBuf, quant: usize, quant_nf4: usize) -> PyResult<Self> {
+    #[pyo3(signature = (path, quant=0, quant_nf4=0, quant_sf4=0))]
+    pub fn new(path: PathBuf, quant: usize, quant_nf4: usize, quant_sf4: usize) -> PyResult<Self> {
         let tokio = Arc::new(tokio::runtime::Runtime::new()?);
         let (context, info, runtime, state) = tokio
-            .block_on(load_runtime(path, quant, quant_nf4))
+            .block_on(load_runtime(path, quant, quant_nf4, quant_sf4))
             .map_err(err)?;
         Ok(Self {
             tokio,
@@ -189,7 +195,7 @@ impl Model {
     }
 
     pub fn info(&self) -> info::ModelInfo {
-        self.info.as_ref().clone().into()
+        self.info.clone().into()
     }
 
     pub fn init_state(&self) -> State {
@@ -273,12 +279,17 @@ impl Model {
                 break;
             }
 
-            let (input, output) = self.runtime.infer(input).await;
-            inference = Some(input);
+            let (input, output) = match self.runtime.infer(input).await {
+                Ok(output) => output,
+                Err(err) => {
+                    bail!(err);
+                }
+            };
 
             num_token += output[0].0.shape()[1];
             let mut output = output[0].clone().to_vec();
             data.append(&mut output);
+            inference.replace(input);
         }
 
         let num_vocab = self.info.num_vocab;

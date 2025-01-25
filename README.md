@@ -28,6 +28,7 @@ Python binding for [`web-rwkv`](https://github.com/cryscan/web-rwkv).
       "/path/to/model.st", # model path
       quant=0,             # int8 quantization layers
       quant_nf4=0,         # nf4 quantization layers
+      quant_sf4=0,         # sf4 quantization layers
    )
    model.clear_state()
    logits = model.run([114, 514])

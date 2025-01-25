@@ -1,6 +1,6 @@
 import web_rwkv_py as wrp
 
-model = wrp.Model("../ai00_rwkv_server/assets/models/RWKV-x060-World-1B6-v2.1-20240328-ctx4096.st")
+model = wrp.Model("/home/molly/ubuntu22-rootfs/home/molly/workspace/models/RWKV-x060-World-7B-v3-20241112-ctx4096.st", quant_sf4=99)
 tokenizer = wrp.Tokenizer("./assets/rwkv_vocab_v20230424.json")
 
 prompt_0 = "The Eiffel Tower is"
