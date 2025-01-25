@@ -15,7 +15,7 @@ half = { version = "2.2", features = ["bytemuck", "serde"] }
 itertools = "0.14"
 memmap2 = "0.9"
 pollster = "0.3.0"
-pyo3 = "0.21.2"
+pyo3 = "0.23.3"
 safetensors = "0.5"
 tokio = { version = "1.37", features = ["full"] }
 uid = "0.1.7"
