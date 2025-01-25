@@ -3,13 +3,13 @@ Python binding for [`web-rwkv`](https://github.com/cryscan/web-rwkv).
 
 # Todos
 - [x] Basic V5 inference support
-- [x] Support V4, V5 and V6
+- [x] Support V4, V5, V6 and V7
 - [ ] Batched inference
 
 # Usage
 1. Install python and rust.
 2. Install maturin by
-   
+
    ```bash
    $ pip install maturin
    ```
