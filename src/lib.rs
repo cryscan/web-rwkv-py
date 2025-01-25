@@ -246,7 +246,7 @@ impl Model {
     #[pyo3(signature = (tokens, token_chunk_size=128))]
     pub fn run_full(&self, tokens: Vec<u16>, token_chunk_size: usize) -> PyResult<Vec<f32>> {
         let model = self.clone();
-        let option = InferOption::Last;
+        let option = InferOption::Full;
         let output = self
             .tokio
             .block_on(model.run_internal(tokens, option, token_chunk_size))
