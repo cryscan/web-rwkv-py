@@ -12,12 +12,12 @@ name = "web_rwkv_py"
 anyhow = "1"
 derivative = "2.2.0"
 half = { version = "2.2", features = ["bytemuck", "serde"] }
-itertools = "0.13"
+itertools = "0.14"
 memmap2 = "0.9"
 pollster = "0.3.0"
-pyo3 = "0.21.2"
-safetensors = "0.4"
-tokio = "1.37"
+pyo3 = "0.23.3"
+safetensors = "0.5"
+tokio = { version = "1.37", features = ["full"] }
 uid = "0.1.7"
 web-rwkv-derive = "0.2.0"
 
@@ -25,4 +25,4 @@ web-rwkv-derive = "0.2.0"
 default-features = false
 features = ["native"]
 # path = "../web-rwkv"
-version = "0.8.14"
+version = "0.10.8"

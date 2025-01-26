@@ -6,6 +6,7 @@ pub enum ModelVersion {
     V4,
     V5,
     V6,
+    V7,
 }
 
 impl From<web_rwkv::runtime::model::ModelVersion> for ModelVersion {
@@ -14,6 +15,7 @@ impl From<web_rwkv::runtime::model::ModelVersion> for ModelVersion {
             web_rwkv::runtime::model::ModelVersion::V4 => Self::V4,
             web_rwkv::runtime::model::ModelVersion::V5 => Self::V5,
             web_rwkv::runtime::model::ModelVersion::V6 => Self::V6,
+            web_rwkv::runtime::model::ModelVersion::V7 => Self::V7,
         }
     }
 }
@@ -41,10 +43,6 @@ pub struct ModelInfo {
     pub num_vocab: usize,
     #[pyo3(get)]
     pub num_head: usize,
-    #[pyo3(get)]
-    pub time_mix_adapter_size: usize,
-    #[pyo3(get)]
-    pub time_decay_adapter_size: usize,
 }
 
 impl From<web_rwkv::runtime::model::ModelInfo> for ModelInfo {
@@ -56,8 +54,7 @@ impl From<web_rwkv::runtime::model::ModelInfo> for ModelInfo {
             num_hidden,
             num_vocab,
             num_head,
-            time_mix_adapter_size,
-            time_decay_adapter_size,
+            ..
         } = value;
         let version = version.into();
         Self {
@@ -67,8 +64,6 @@ impl From<web_rwkv::runtime::model::ModelInfo> for ModelInfo {
             num_hidden,
             num_vocab,
             num_head,
-            time_mix_adapter_size,
-            time_decay_adapter_size,
         }
     }
 }
